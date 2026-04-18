@@ -61,3 +61,16 @@ uv run python stage2/predict.py predict \
 The input CSV must follow the same raw-feature schema as
 `data_engineering.csv` (columns `zip_code`, `weekday`, `is_peak`,
 `log_traffic_count`, weather flags/z-scores, and the `WT0x` indicators).
+
+### Spatial diagnostics
+
+After `predict.py fit` has produced the final models, render a set of
+ZIP-level choropleths (observed vs predicted, residuals, peak/off-peak
+gap, NB conditional SD):
+
+```bash
+uv run python stage2_analysis/plot_maps.py
+```
+
+Outputs land in `stage2_analysis/figures/` (one map per PNG plus a
+combined 2×2 summary).
