@@ -1,9 +1,11 @@
 """
-Stage 2: retrain on the full engineered panel (train+val+test) with the best
-hyperparameters found by grid search, then predict crash counts on new data.
+Stage 2: retrain on the full engineered panel with the best hyperparameters
+found by grid search, then predict crash counts on new data.
 
-Two subcommands:
+Two CLI subcommands and a Python API.
 
+CLI
+---
   fit      -- Refit Poisson + NB on ALL rows of the engineered panel and save
               final models to stage2/checkpoints/final/. The grid-search step
               has already happened (see main.py); no held-out evaluation runs
@@ -11,11 +13,26 @@ Two subcommands:
 
   predict  -- Load the saved final models and score a new CSV that follows the
               same raw-feature schema as data_engineering.csv. Outputs a CSV
-              with two extra columns `pred_poisson` and `pred_nb` (conditional
-              means). Optionally decodes the target column if present.
+              with `pred_poisson` and `pred_nb` columns appended.
 
-Examples
---------
+Python API (for Streamlit / notebooks / single-row inference)
+-------------------------------------------------------------
+    from stage2.predict import CrashPredictor
+    predictor = CrashPredictor()              # loads models once
+    result = predictor.predict_one({          # single-row dict
+        "zip_code": 11207, "weekday": 1, "is_peak": 1,
+        "log_traffic_count": 8.5,
+        "is_rain": 0, "log_prcp": 0.0,
+        "is_snow": 0, "log_snow": 0.0,
+        "has_snow_depth": 0, "log_snwd": 0.0,
+        "tavg_z": 0.3, "awnd_z": -0.2,
+        "WT01": 0, "WT02": 0, "WT03": 0, "WT04": 0, "WT06": 0, "WT08": 0,
+    })
+    # -> {"mu_poisson": 1.87, "mu_nb": 1.89, "nb_sd": 1.63,
+    #     "nb_ci95": (0, 5), "alpha": 0.2}
+
+CLI examples
+------------
     uv run python stage2/predict.py fit
     uv run python stage2/predict.py predict \\
         data/new_panel.csv  data/new_panel_pred.csv
@@ -199,53 +216,143 @@ def cmd_fit(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
-# predict
+# predict — Python API
+# ---------------------------------------------------------------------------
+
+class CrashPredictor:
+    """Single entry point for Stage 2 inference.
+
+    Loads both the final Poisson and NB models once, caches their shared
+    feature schema, and exposes two methods:
+      * `predict_one(record)`  — single observation dict (Streamlit / app use)
+      * `predict_frame(df)`    — batch DataFrame (CSV pipeline use)
+
+    Both models are loaded regardless of which is queried, because loading is
+    cheap (~1.5 MB npz each) and the typical caller wants both numbers.
+    """
+
+    def __init__(self, model_dir: str | Path = DEFAULT_MODEL_DIR):
+        model_dir = Path(model_dir)
+        if not model_dir.exists():
+            raise FileNotFoundError(
+                f"Model dir not found: {model_dir.resolve()}. "
+                f"Run `python stage2/predict.py fit` first.")
+        self.model_dir = model_dir
+        self.poisson = load_model(model_dir / "poisson.npz")
+        self.nb = load_model(model_dir / "nb.npz")
+        # feature_names_ is attached dynamically by _load_model_npz; go
+        # through getattr so static analyzers don't complain.
+        fnames = getattr(self.poisson, "feature_names_", None)
+        if fnames is None:
+            raise RuntimeError(
+                "Loaded model is missing feature_names_ metadata; "
+                "regenerate it via `python stage2/predict.py fit`.")
+        self.feature_names: list[str] = list(fnames)
+        self.alpha = float(getattr(self.nb, "alpha", 0.2))
+
+    # ----- single-row -------------------------------------------------
+
+    def predict_one(self, record: dict) -> dict:
+        """Predict crash count for one (zip, weekday, is_peak, weather) row.
+
+        Parameters
+        ----------
+        record : dict
+            One row of raw engineered features. Must contain the same keys as
+            a row of data_engineering.csv except for the target.
+
+        Returns
+        -------
+        dict with
+            mu_poisson : float   — Poisson conditional mean
+            mu_nb      : float   — NB conditional mean
+            nb_sd      : float   — sqrt(mu + alpha * mu^2)
+            nb_ci95    : (int,int) — 95% prediction interval for observed count
+            alpha      : float   — NB dispersion parameter actually used
+        """
+        batch = self.predict_frame(pd.DataFrame([record]))
+        return {
+            "mu_poisson": float(batch["mu_poisson"][0]),
+            "mu_nb": float(batch["mu_nb"][0]),
+            "nb_sd": float(batch["nb_sd"][0]),
+            "nb_ci95": (int(batch["nb_lo95"][0]), int(batch["nb_hi95"][0])),
+            "alpha": self.alpha,
+        }
+
+    # ----- batch ------------------------------------------------------
+
+    def predict_frame(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+        """Predict for every row of a DataFrame. Returns per-row arrays."""
+        X = _featurize_to_schema(df, self.feature_names)
+        mu_p = self.poisson.predict(X)
+        mu_nb = self.nb.predict(X)
+        sd = np.sqrt(mu_nb + self.alpha * mu_nb ** 2)
+        lo, hi = _nb_interval(mu_nb, self.alpha, level=0.95)
+        return {
+            "mu_poisson": mu_p,
+            "mu_nb": mu_nb,
+            "nb_sd": sd,
+            "nb_lo95": lo,
+            "nb_hi95": hi,
+        }
+
+
+def _nb_interval(mu: np.ndarray, alpha: float,
+                 *, level: float = 0.95) -> tuple[np.ndarray, np.ndarray]:
+    """NB2 prediction interval at integer quantiles.
+
+    NB2 with mean mu and Var = mu + alpha*mu^2 maps to scipy's (n, p)
+    parameterization as:
+        n = 1 / alpha               (same for all rows; must be > 0)
+        p = 1 / (1 + alpha * mu)    (per row)
+    """
+    from scipy.stats import nbinom
+    if alpha <= 0:
+        # Degenerate: NB collapses to Poisson; use Poisson quantiles.
+        from scipy.stats import poisson
+        lo_q = (1 - level) / 2
+        hi_q = 1 - lo_q
+        return (poisson.ppf(lo_q, mu).astype(int),
+                poisson.ppf(hi_q, mu).astype(int))
+    n = 1.0 / alpha
+    p = 1.0 / (1.0 + alpha * np.asarray(mu, dtype=np.float64))
+    lo_q = (1 - level) / 2
+    hi_q = 1 - lo_q
+    return (nbinom.ppf(lo_q, n, p).astype(int),
+            nbinom.ppf(hi_q, n, p).astype(int))
+
+
+# ---------------------------------------------------------------------------
+# predict — CLI wrapper
 # ---------------------------------------------------------------------------
 
 def cmd_predict(args: argparse.Namespace) -> None:
     in_path = Path(args.input)
     out_path = Path(args.output)
-    model_dir = Path(args.model_dir)
     if not in_path.exists():
         raise SystemExit(f"Input CSV not found: {in_path.resolve()}")
-    if not model_dir.exists():
-        raise SystemExit(
-            f"Model dir not found: {model_dir.resolve()}. "
-            f"Run `python stage2/predict.py fit` first.")
 
-    print(f"[predict] loading models from {model_dir}")
-    models: dict[str, object] = {}
-    if args.model in ("poisson", "both"):
-        models["poisson"] = load_model(model_dir / "poisson.npz")
-    if args.model in ("nb", "both"):
-        models["nb"] = load_model(model_dir / "nb.npz")
-
-    # Both models share the same schema (trained on the same panel); use
-    # whichever was loaded first to establish the feature list.
-    any_model = next(iter(models.values()))
-    feature_names = any_model.feature_names_
-    if feature_names is None:
-        raise SystemExit(
-            "Loaded model does not carry feature_names_; it was saved by an "
-            "older code version. Rerun `fit` to regenerate.")
+    print(f"[predict] loading models from {args.model_dir}")
+    predictor = CrashPredictor(args.model_dir)
 
     print(f"[predict] reading {in_path}")
     df = pd.read_csv(in_path)
-    X = _featurize_to_schema(df, feature_names)
-    print(f"[predict] aligned X={X.shape} to {len(feature_names)} features")
+    preds = predictor.predict_frame(df)
+    print(f"[predict] scored n={len(df)} rows; "
+          f"mu_nb mean={preds['mu_nb'].mean():.3f}  "
+          f"max={preds['mu_nb'].max():.3f}")
 
     out = df.copy()
-    for name, m in models.items():
-        mu = m.predict(X)
-        out[f"pred_{name}"] = mu
-        print(f"[predict] {name}: mu min={mu.min():.3f}  "
-              f"mean={mu.mean():.3f}  max={mu.max():.3f}")
+    out["pred_poisson"] = preds["mu_poisson"]
+    out["pred_nb"] = preds["mu_nb"]
+    out["nb_sd"] = preds["nb_sd"]
+    out["nb_lo95"] = preds["nb_lo95"]
+    out["nb_hi95"] = preds["nb_hi95"]
 
-    # Optional: if the target is present, log a quick sanity metric.
     if "log_crash_count" in df.columns:
         y_true = np.rint(np.expm1(df["log_crash_count"].to_numpy())).clip(0)
-        for name, m in models.items():
-            mu = out[f"pred_{name}"].to_numpy()
+        for name, col in [("poisson", "pred_poisson"), ("nb", "pred_nb")]:
+            mu = out[col].to_numpy()
             mae = float(np.mean(np.abs(y_true - mu)))
             rmse = float(np.sqrt(np.mean((y_true - mu) ** 2)))
             print(f"[predict] {name} on input (decoded target): "
@@ -265,14 +372,11 @@ def parse_args() -> argparse.Namespace:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pf = sub.add_parser("fit", help="Refit on train+val (+test) with best hp.")
+    pf = sub.add_parser("fit", help="Refit on the full panel with best hp.")
     pf.add_argument("--csv", default=DEFAULT_CSV,
                     help="Engineered panel CSV.")
     pf.add_argument("--model-dir", default=DEFAULT_MODEL_DIR,
                     help="Directory to save final models into.")
-    pf.add_argument("--include-test", action="store_true",
-                    help="Also use the test split for β estimation "
-                         "(production mode; skips held-out evaluation).")
     pf.add_argument("--quiet", action="store_true")
     pf.set_defaults(func=cmd_fit)
 
@@ -281,8 +385,6 @@ def parse_args() -> argparse.Namespace:
     pp.add_argument("output", help="Output CSV with pred_* columns appended.")
     pp.add_argument("--model-dir", default=DEFAULT_MODEL_DIR,
                     help="Directory holding poisson.npz and nb.npz.")
-    pp.add_argument("--model", choices=("poisson", "nb", "both"),
-                    default="both", help="Which model(s) to apply.")
     pp.set_defaults(func=cmd_predict)
 
     return p.parse_args()
