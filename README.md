@@ -46,14 +46,22 @@ uv run python stage2/main.py \
 
 ### Final prediction pipeline
 
-Retrain on the full panel with the best hyperparameters, then score new
-raw-feature CSVs:
+**1) Refit on the full panel.** Retrain Poisson + NB on ALL rows with
+the best hyperparameters; writes
+`stage2/checkpoints/final/{poisson,nb}.npz`.
 
 ```bash
-# 1) Refit Poisson + NB on ALL rows; writes stage2/checkpoints/final/{poisson,nb}.npz
 uv run python stage2/predict.py fit
+```
 
-# 2) Predict on new data. Output CSV gets pred_poisson and pred_nb columns.
+**2) Single-record scoring (Streamlit).** `CrashPredictor.predict_one(record)`
+returns a dict with `mu_poisson`, `mu_nb`, `nb_sd`, and the 95% NB
+prediction interval — used by the Streamlit app.
+
+**3) Batch CSV scoring.** Score a new raw-feature CSV; the output CSV
+gets `pred_poisson` and `pred_nb` columns.
+
+```bash
 uv run python stage2/predict.py predict \
     data/new_panel.csv  data/new_panel_pred.csv
 ```
@@ -61,16 +69,3 @@ uv run python stage2/predict.py predict \
 The input CSV must follow the same raw-feature schema as
 `data_engineering.csv` (columns `zip_code`, `weekday`, `is_peak`,
 `log_traffic_count`, weather flags/z-scores, and the `WT0x` indicators).
-
-### Spatial diagnostics
-
-After `predict.py fit` has produced the final models, render a set of
-ZIP-level choropleths (observed vs predicted, residuals, peak/off-peak
-gap, NB conditional SD):
-
-```bash
-uv run python stage2_analysis/plot_maps.py
-```
-
-Outputs land in `stage2_analysis/figures/` (one map per PNG plus a
-combined 2×2 summary).
