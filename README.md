@@ -19,7 +19,7 @@ Run the offline experiment pipeline. This executes a strict 60/20/20 chronologic
 
 ```bash
 uv run python -m stage1.main --csv data/data_engineering.csv
-
+```
 ## Stage 2 — Crash Count Models (Poisson / Negative Binomial)
 
 Stage 2 fits a Poisson GLM and a Negative Binomial (NB2) GLM to the
