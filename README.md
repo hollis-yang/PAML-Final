@@ -110,3 +110,11 @@ uv run python stage2/predict.py predict \
 The input CSV must follow the same raw-feature schema as
 `data_engineering.csv` (columns `zip_code`, `weekday`, `is_peak`,
 `log_traffic_count`, weather flags/z-scores, and the `WT0x` indicators).
+
+## Authors
+
+- Haoyang Song (hs2289)
+- Hanqi Guo (hg493)
+- Leafred Ye (zy495)
+- Wenzhuo Zhang (wz475)
+- Yu Rao (yr279)
