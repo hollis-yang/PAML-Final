@@ -9,17 +9,45 @@ uv run streamlit run streamlit/app.py
 
 ## Stage 1 — Traffic Volume Models (Ridge / Bayesian Linear)
 
-Stage 1 predicts the log-transformed traffic volume (`log_traffic_count`), which serves as a critical exposure variable for the Stage 2 crash prediction models. It implements Ridge Regression and Bayesian Linear Regression from scratch using closed-form analytical solutions (Normal Equation and Posterior Inference) in pure NumPy.
+Stage 1 fits a Ridge Regression and a Bayesian Linear Regression to the
+engineered panel in `data/data_engineering.csv`, using a from-scratch NumPy
+implementation with closed-form analytical solutions.
 
-To effectively capture spatial-temporal patterns without target leakage, this stage features a robust out-of-fold (OOF) Target Encoding pipeline combined with a strict chronological split.
+### Offline experiment and hyperparameter tuning
 
-### Offline Experiment & Hyperparameter Tuning
-
-Run the offline experiment pipeline. This executes a strict 60/20/20 chronological split, extracts OOF target encodings to prevent in-sample leakage, performs hyperparameter grid search (Ridge L2 penalty, Bayesian Alpha) exclusively on the validation set, and reports the final unbiased metrics (RMSE, MAE, R², WMAPE) on the held-out test set.
+Run the offline experiment pipeline. A strict 70/15/15 chronological
+split is used, combined with out-of-fold (OOF) target encoding to prevent
+in-sample leakage. Grid searches are performed exclusively on the validation
+set, and unbiased metrics are reported on the held-out test set.
 
 ```bash
 uv run python -m stage1.main --csv data/data_engineering.csv
 ```
+
+### Final prediction pipeline
+
+**1) Refit on the full panel.** Retrain Ridge + Bayesian on ALL rows with
+the best hyperparameters discovered offline. Computes global target encoding
+mappings and writes `stage1/checkpoints/final/{ridge,bayesian}.npz`.
+
+```bash
+uv run python -m stage1.predict fit
+```
+
+**2) Single-record scoring (Streamlit).** `TrafficPredictor.predict_one(record)`
+dynamically reconstructs target encodings and exact One-Hot schemas. It
+returns a dict with `traffic_ridge` and `traffic_bayesian` — used by the
+Streamlit app.
+
+**3) Batch CSV scoring.** Score a new raw-feature CSV; the output CSV
+gets `pred_traffic_ridge` and `pred_traffic_bayesian` columns.
+
+```bash
+uv run python -m stage1.predict predict \
+    data/new_panel.csv  data/new_panel_pred.csv
+```
+
+
 ## Stage 2 — Crash Count Models (Poisson / Negative Binomial)
 
 Stage 2 fits a Poisson GLM and a Negative Binomial (NB2) GLM to the
