@@ -3,6 +3,18 @@ import pandas as pd
 import numpy as np
 import datetime
 import altair as alt
+import sys
+import json
+from pathlib import Path
+import geopandas as gpd
+
+# Add project root to path to allow stage1/stage2 imports
+
+# Add project root to path to allow stage1/stage2 imports
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from stage1.predict import TrafficPredictor
+from stage2.predict import CrashPredictor
 
 # Enable dark theme for Altair
 alt.themes.enable('dark')
@@ -43,13 +55,9 @@ st.markdown("""
     }
 
     .header-container {
-        background: rgba(30, 41, 59, 0.4);
-        backdrop-filter: blur(10px);
-        padding: 0.8rem 1rem;
-        border-radius: 16px;
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        margin-bottom: 1.5rem;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+        padding: 0.5rem 1rem;
+        margin-bottom: 2rem;
+        text-align: center;
     }
     
     /* Premium Dark Blue Containers (Targeted) */
@@ -99,6 +107,67 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+# --- Model Loading ---
+@st.cache_resource
+def load_models():
+    return TrafficPredictor(), CrashPredictor()
+
+try:
+    traffic_model, crash_model = load_models()
+except Exception as e:
+    st.error(f"Error loading models: {e}")
+    st.stop()
+
+# Constants for normalization (calculated from data/data.csv)
+TAVG_MEAN, TAVG_STD = 57.07, 16.32
+AWND_MEAN, AWND_STD = 5.03, 2.36
+
+# --- Cached Map Data Loading ---
+@st.cache_data
+def get_raw_data():
+    # Use the engineered dataset as requested
+    df = pd.read_csv("data/data_engineering.csv")
+    # Convert log counts back to real counts for visualization
+    if 'log_crash_count' in df.columns:
+        df['crash_count'] = np.expm1(df['log_crash_count'])
+    return df
+
+@st.cache_data
+def get_map_shapes():
+    shp_path = "data/geo_data/nyc_zip/nyc_zip.shp"
+    gdf = gpd.read_file(shp_path)
+    if "ZIPCODE" in gdf.columns:
+        gdf["zip_code"] = gdf["ZIPCODE"].astype(str)
+    elif "zcta" in gdf.columns:
+        gdf["zip_code"] = gdf["zcta"].astype(str)
+    if gdf.crs != "EPSG:4326":
+        gdf = gdf.to_crs(epsg=4326)
+    return gdf
+
+def filter_data(df, time_period, weather, zip_code):
+    filtered = df.copy()
+    
+    # 1. Time Period (using is_peak)
+    if time_period == "Peak":
+        filtered = filtered[filtered['is_peak'] == 1]
+    elif time_period == "Off-Peak":
+        filtered = filtered[filtered['is_peak'] == 0]
+        
+    # 2. Weather
+    if weather == "Rain":
+        filtered = filtered[filtered['is_rain'] == 1]
+    elif weather == "Snow":
+        filtered = filtered[filtered['is_snow'] == 1]
+    elif weather == "Fog":
+        if 'WT01' in filtered.columns:
+            filtered = filtered[filtered['WT01'] == 1]
+            
+    # 3. ZIP Code
+    if zip_code:
+        filtered = filtered[filtered['zip_code'].astype(str) == str(zip_code)]
+        
+    return filtered
 
 # --- Header ---
 st.markdown("""
@@ -161,14 +230,77 @@ with tab_pred:
             st.markdown('<span class="premium-card"></span>', unsafe_allow_html=True)
             
             if predict_button:
-                # Placeholder prediction logic
-                predicted_crashes = 42
-                estimated_volume = 15230
+                # 1. Prepare inputs for Stage 1
+                # Standardize weekday to 0-6 (Streamlit's date.weekday() is 0=Mon)
+                wd = date_input.weekday()
+                peak_val = 1 if time_period == "Peak Hours" else 0
+                
+                # Z-score normalization for TAVG and AWND
+                tavg_z = (temp - TAVG_MEAN) / TAVG_STD
+                awnd_z = (wind_speed - AWND_MEAN) / AWND_STD
+                
+                # Log transforms for precip, snow, etc.
+                log_prcp = np.log1p(precip)
+                log_snow = np.log1p(snowfall)
+                log_snwd = np.log1p(snow_depth)
+                
+                # Binary weather flags
+                is_rain = 1 if precip > 0 else 0
+                is_snow = 1 if snowfall > 0 else 0
+                has_snwd = 1 if snow_depth > 0 else 0
+                
+                # NOAA WT flags mapping
+                wt_record = {
+                    "WT01": 1 if fog else 0,
+                    "WT02": 1 if heavy_fog else 0,
+                    "WT03": 1 if thunder else 0,
+                    "WT04": 1 if ice_pellets else 0,
+                    "WT06": 1 if glaze else 0,
+                    "WT08": 0 # Not directly mapped from UI currently
+                }
+                
+                input_record = {
+                    "zip_code": str(zip_code) if zip_code else "10001",
+                    "weekday": wd,
+                    "is_peak": peak_val,
+                    "tavg_z": tavg_z,
+                    "awnd_z": awnd_z,
+                    "is_rain": is_rain,
+                    "log_prcp": log_prcp,
+                    "is_snow": is_snow,
+                    "log_snow": log_snow,
+                    "has_snow_depth": has_snwd,
+                    "log_snwd": log_snwd,
+                    **wt_record
+                }
+
+                # 2. Stage 1 Inference: Predict Traffic Volume
+                with st.spinner("Estimating traffic volume..."):
+                    t1_preds = traffic_model.predict_one(input_record)
+                    estimated_volume = t1_preds["traffic_ridge"]
+                    # Stage 2 expects log_traffic_count
+                    input_record["log_traffic_count"] = np.log1p(estimated_volume)
+
+                # 3. Stage 2 Inference: Predict Crash Count
+                with st.spinner("Predicting crash frequency..."):
+                    c2_preds = crash_model.predict_one(input_record)
+                    predicted_crashes = c2_preds["mu_nb"]
+                    lo95, hi95 = c2_preds["nb_ci95"]
+                
+                # Determine color based on risk level
+                if predicted_crashes < 0.5:
+                    res_color = "#22c55e" # Green (Low Risk)
+                elif predicted_crashes < 1.5:
+                    res_color = "#f97316" # Orange (Medium Risk)
+                else:
+                    res_color = "#ef4444" # Red (High Risk)
                 
                 # Prominent Predicted Crash Count
-                st.markdown(f"<h1 style='text-align: center; color: #ff4b4b; margin-bottom: 0px;'>Predicted Crash Count: {predicted_crashes}</h1>", unsafe_allow_html=True)
+                st.markdown(f"<h1 style='text-align: center; color: {res_color}; margin-bottom: 0px;'>Predicted Crash Count: {predicted_crashes:.2f}</h1>", unsafe_allow_html=True)
+                st.markdown(f"<p style='text-align: center; color: #94a3b8; font-size: 1.1rem; margin-top: 0px;'>95% Confidence Interval: [{lo95}, {hi95}]</p>", unsafe_allow_html=True)
+                
                 # Smaller Estimated Traffic Volume
-                st.markdown(f"<h4 style='text-align: center; color: gray; margin-top: 0px;'>Estimated Traffic Volume: {estimated_volume:,} vehicles</h4>", unsafe_allow_html=True)
+                st.markdown(f"<h4 style='text-align: center; color: gray; margin-top: 10px;'>Estimated Traffic Volume: {int(estimated_volume):,} vehicles</h4>", unsafe_allow_html=True)
                 
                 # Model explanation
                 st.info("This prediction is generated using a two-stage model. Traffic volume is first estimated based on time, location, and weather, and then used to predict crash counts.")
@@ -176,7 +308,7 @@ with tab_pred:
                 # Input summary box
                 st.markdown("---")
                 st.markdown("##### Input Summary")
-                st.write(f"**ZIP Code:** {zip_code if zip_code else 'Not specified'}  |  **Date:** {date_input}  |  **Time:** {time_period}")
+                st.write(f"**ZIP Code:** {zip_code if zip_code else '10001'}  |  **Date:** {date_input} (Weekday: {wd})  |  **Time:** {time_period}")
                 st.write(f"**Weather:** {temp}°F, {precip}in precip, {wind_speed}mph wind")
                 
                 flags_selected = [flag_name for flag_val, flag_name in zip(
@@ -190,40 +322,23 @@ with tab_pred:
                     st.write("**Active Weather Flags:** None")
                 
                 st.markdown("---")
-                st.markdown("##### Historical Crash Counts (2020–2025)")
-                
-                # Generate placeholder historical data including the prediction
-                years = list(range(2020, 2026))
-                hist_counts = [35, 38, 40, 37, 45, predicted_crashes]
-                
-                chart_data = pd.DataFrame({
-                    "Year": years,
-                    "Crash Count": hist_counts,
-                    "Type": ["Historical"] * 5 + ["Predicted"]
+                st.markdown("##### Comparison: Poisson vs Negative Binomial")
+                comp_df = pd.DataFrame({
+                    "Model": ["Poisson", "Negative Binomial"],
+                    "Predicted Count": [c2_preds["mu_poisson"], c2_preds["mu_nb"]]
                 })
                 
-                # Create Altair chart for better control over the highlighted predicted point
-                base = alt.Chart(chart_data).encode(
-                    x=alt.X('Year:O', axis=alt.Axis(labelAngle=0))
-                )
-                line = base.mark_line(color='#1f77b4').encode(
-                    y='Crash Count:Q'
-                )
-                points = base.mark_circle(size=100).encode(
-                    y='Crash Count:Q',
-                    color=alt.Color('Type:N', scale=alt.Scale(domain=['Historical', 'Predicted'], range=['#1f77b4', '#ff4b4b']), legend=alt.Legend(title="Data Type"))
-                )
+                # Use Altair to give each model a distinct color
+                compare_chart = alt.Chart(comp_df).mark_bar().encode(
+                    x=alt.X("Model:N", axis=alt.Axis(labelAngle=0)),
+                    y=alt.Y("Predicted Count:Q"),
+                    color=alt.Color("Model:N", scale=alt.Scale(
+                        domain=["Poisson", "Negative Binomial"],
+                        range=["#1f77b4", "#f97316"] # Classic Blue for Poisson, Orange for NB
+                    ), legend=None)
+                ).properties(height=300)
                 
-                # Label the predicted point
-                pred_data = chart_data[chart_data['Type'] == 'Predicted']
-                text = alt.Chart(pred_data).mark_text(
-                    align='left', baseline='middle', dx=10, dy=-15, fontSize=14, color='#ff4b4b', text="Pred."
-                ).encode(
-                    x=alt.X('Year:O'), 
-                    y='Crash Count:Q'
-                )
-                
-                st.altair_chart(line + points + text, use_container_width=True)
+                st.altair_chart(compare_chart, use_container_width=True)
                 
             else:
                 # Show a placeholder instruction when the button hasn't been clicked yet
@@ -257,22 +372,67 @@ with tab_explore:
     with exp_col2:
         st.subheader("Visual Analysis")
         
-        if apply_filters:
-            st.toast("Filters applied!", icon="✅")
-        
+        # Load data once
+        try:
+            full_df = get_raw_data()
+            if apply_filters:
+                # Note: Date range is kept in UI but ignored in filter_data for now as DATE column is missing
+                df_to_plot = filter_data(full_df, time_period_filter, weather_filter, zip_filter)
+                st.toast(f"Filters applied! Showing {len(df_to_plot):,} records.")
+            else:
+                df_to_plot = full_df
+        except Exception as e:
+            st.error(f"Error loading data: {e}")
+            df_to_plot = pd.DataFrame()
+
         # 1. Crash Density by ZIP Code
         with st.container(border=True):
-            st.markdown("#### Crash Density by ZIP Code")
-            # Generate placeholder map data around NYC
-            map_data = pd.DataFrame(
-                np.random.randn(150, 2) / [50, 50] + [40.7128, -74.0060],
-                columns=['lat', 'lon']
-            )
-            import plotly.express as px
-            fig = px.scatter_mapbox(map_data, lat="lat", lon="lon", zoom=9, height=350, opacity=0.6)
-            fig.update_layout(mapbox_style="carto-positron", margin={"r":0,"t":0,"l":0,"b":0})
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption("Highlights spatial differences in crash frequency across NYC.")
+            st.markdown("#### Average Crash Density (Engineered)")
+            with st.spinner("Updating map..."):
+                try:
+                    map_gdf = get_map_shapes()
+                    # Aggregate filtered data
+                    agg_filtered = df_to_plot.groupby("zip_code")["crash_count"].mean().reset_index()
+                    agg_filtered.columns = ["zip_code", "avg_crashes"]
+                    agg_filtered["zip_code"] = agg_filtered["zip_code"].astype(str)
+                    
+                    # Merge with shapes
+                    map_merged = map_gdf.merge(agg_filtered, on="zip_code", how="left").fillna(0)
+                    
+                    # Calculate dynamic center and zoom
+                    map_center = {"lat": 40.7128, "lon": -74.0060}
+                    map_zoom = 9
+                    
+                    if zip_filter:
+                        selected_zip_gdf = map_gdf[map_gdf["zip_code"] == str(zip_filter)]
+                        if not selected_zip_gdf.empty:
+                            centroid = selected_zip_gdf.geometry.centroid.iloc[0]
+                            map_center = {"lat": centroid.y, "lon": centroid.x}
+                            map_zoom = 12
+                    
+                    import plotly.express as px
+                    fig = px.choropleth_mapbox(
+                        map_merged,
+                        geojson=json.loads(map_merged.to_json()),
+                        locations="zip_code",
+                        featureidkey="properties.zip_code",
+                        color="avg_crashes",
+                        color_continuous_scale="YlOrRd",
+                        range_color=(0, map_merged["avg_crashes"].quantile(0.98) if not map_merged["avg_crashes"].empty else 1),
+                        mapbox_style="carto-positron",
+                        zoom=map_zoom,
+                        center=map_center,
+                        opacity=0.7,
+                        hover_name="zip_code",
+                        hover_data={"avg_crashes": ":.3f", "zip_code": False},
+                        labels={"avg_crashes": "Avg Crashes"},
+                        height=500
+                    )
+                    fig.update_layout(margin={"r":0,"t":0,"l":0,"b":0}, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Could not load map: {e}")
+            st.caption("Choropleth map showing engineered crash density averages.")
             
         st.markdown("<br>", unsafe_allow_html=True)
             
@@ -280,65 +440,76 @@ with tab_explore:
         with st.container(border=True):
             st.markdown("#### Crash Heatmap by Hour & Day")
             
-            # Generate placeholder heatmap data
-            days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-            hours = list(range(24))
-            heatmap_data = []
-            for d in days:
-                for h in hours:
-                    # make it peak at 8 and 17
-                    base = 10
-                    if 7 <= h <= 9 or 16 <= h <= 18:
-                        base = 50
-                    count = np.random.poisson(base)
-                    heatmap_data.append({"Day of Week": d, "Hour of Day": h, "Crashes": count})
-            df_heatmap = pd.DataFrame(heatmap_data)
-            
-            heat = alt.Chart(df_heatmap).mark_rect().encode(
-                x=alt.X('Day of Week:O', sort=days),
-                y=alt.Y('Hour of Day:O'),
-                color=alt.Color('Crashes:Q', scale=alt.Scale(scheme='orangered'))
-            ).properties(height=350)
-            
-            st.altair_chart(heat, use_container_width=True)
-            st.caption("Shows peak crash periods across different days and hours.")
+            if not df_to_plot.empty:
+                days_map = {0:"Mon", 1:"Tue", 2:"Wed", 3:"Thu", 4:"Fri", 5:"Sat", 6:"Sun"}
+                df_to_plot['Day'] = df_to_plot['weekday'].map(days_map)
+                
+                # to representative hours.
+                peak_data = df_to_plot[df_to_plot['is_peak'] == 1].groupby('Day')['crash_count'].mean().reset_index()
+                off_data = df_to_plot[df_to_plot['is_peak'] == 0].groupby('Day')['crash_count'].mean().reset_index()
+                
+                heatmap_rows = []
+                for d in days_map.values():
+                    p_val = peak_data[peak_data['Day'] == d]['crash_count'].values[0] if d in peak_data['Day'].values else 0
+                    o_val = off_data[off_data['Day'] == d]['crash_count'].values[0] if d in off_data['Day'].values else 0
+                    
+                    for h in range(24):
+                        # Map to representative hours based on the project's Peak definition (7-9, 16-19)
+                        if (7 <= h <= 9) or (16 <= h <= 19):
+                            heatmap_rows.append({"Day": d, "Hour": h, "Crashes": p_val})
+                        else:
+                            heatmap_rows.append({"Day": d, "Hour": h, "Crashes": o_val})
+                
+                df_heat = pd.DataFrame(heatmap_rows)
+                
+                heat = alt.Chart(df_heat).mark_rect().encode(
+                    x=alt.X('Day:O', sort=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]),
+                    y=alt.Y('Hour:O', title="Hour of Day"),
+                    color=alt.Color('Crashes:Q', scale=alt.Scale(scheme='orangered'), title="Avg Crashes")
+                ).properties(height=350)
+                st.altair_chart(heat, use_container_width=True)
+            else:
+                st.warning("No data available for heatmap.")
             
         st.markdown("<br>", unsafe_allow_html=True)
             
-        # 3. Crash Count Distribution by ZIP Code
+        # 3. Top 10 ZIP Codes by Crash Count
         with st.container(border=True):
-            st.markdown("#### Crash Count Distribution by ZIP Code")
-            
-            zips = ["10001", "10002", "11201", "11101", "10451", "11234", "10013", "10306", "11373", "11207"]
-            counts = np.random.randint(50, 500, size=len(zips))
-            df_dist = pd.DataFrame({"ZIP Code": zips, "Crash Count": counts}).sort_values("Crash Count", ascending=False)
-            
-            bar = alt.Chart(df_dist).mark_bar(color='#1f77b4').encode(
-                x=alt.X('ZIP Code:N', sort='-y', axis=alt.Axis(labelAngle=-45)),
-                y='Crash Count:Q'
-            ).properties(height=350)
-            
-            st.altair_chart(bar, use_container_width=True)
-            st.caption("Displays the distribution of crash counts across ZIP codes.")
+            st.markdown("#### Top 10 ZIP Codes by Crash Count")
+            if not df_to_plot.empty:
+                zip_dist = df_to_plot.groupby("zip_code")["crash_count"].sum().reset_index()
+                zip_dist = zip_dist.sort_values("crash_count", ascending=False).head(10)
+                zip_dist["zip_code"] = zip_dist["zip_code"].astype(str)
+                
+                bar = alt.Chart(zip_dist).mark_bar(color='#1f77b4').encode(
+                    x=alt.X('zip_code:N', sort='-y', axis=alt.Axis(labelAngle=-45), title="ZIP Code"),
+                    y=alt.Y('crash_count:Q', title="Total Crashes")
+                ).properties(height=350)
+                st.altair_chart(bar, use_container_width=True)
+            else:
+                st.warning("No data available for ZIP distribution.")
+            st.caption("Displays the distribution of crash counts across ZIP codes based on active filters.")
             
         st.markdown("<br>", unsafe_allow_html=True)
             
         # 4. Traffic Volume vs. Crash Count
         with st.container(border=True):
             st.markdown("#### Traffic Volume vs. Crash Count")
-            
-            df_scatter = pd.DataFrame({
-                "Traffic Volume": np.random.randint(1000, 20000, 200),
-                "Noise": np.random.normal(0, 20, 200)
-            })
-            # Generate positive correlation
-            df_scatter["Crash Count"] = df_scatter["Traffic Volume"] * 0.005 + df_scatter["Noise"] + 10
-            df_scatter["Crash Count"] = df_scatter["Crash Count"].clip(lower=0)
-            
-            scatter = alt.Chart(df_scatter).mark_circle(size=60, opacity=0.6, color='#ff4b4b').encode(
-                x=alt.X('Traffic Volume:Q', title='Traffic Volume', scale=alt.Scale(zero=False)),
-                y=alt.Y('Crash Count:Q', title='Crash Count')
-            ).properties(height=350)
-            
-            st.altair_chart(scatter.interactive(), use_container_width=True)
-            st.caption("Illustrates the relationship between traffic volume and crash count.")
+            if not df_to_plot.empty:
+                # We use a sample for the scatter plot to maintain performance if data is huge
+                sample_df = df_to_plot.sample(min(2000, len(df_to_plot)))
+                # Convert back to real counts
+                sample_df['Traffic Volume'] = np.expm1(sample_df['log_traffic_count'])
+                sample_df['Crashes'] = sample_df['crash_count']
+                
+                scatter = alt.Chart(sample_df).mark_circle(size=60, opacity=0.4).encode(
+                    x=alt.X('Traffic Volume:Q', title='Estimated Traffic Volume'),
+                    y=alt.Y('Crashes:Q', title='Crash Count'),
+                    color=alt.Color('is_peak:N', scale=alt.Scale(domain=[0, 1], range=['#38bdf8', '#ff4b4b']), legend=alt.Legend(title="Peak Status", values=[0, 1], labelExpr="datum.value == 1 ? 'Peak' : 'Off-Peak'")),
+                    tooltip=['zip_code', 'Traffic Volume', 'Crashes']
+                ).properties(height=400).interactive()
+                
+                st.altair_chart(scatter, use_container_width=True)
+                st.caption("Correlation between estimated traffic volume and crash frequency. Blue: Off-Peak, Red: Peak.")
+            else:
+                st.warning("No data available for correlation chart.")
