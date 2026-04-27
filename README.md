@@ -7,6 +7,47 @@ uv sync
 uv run streamlit run streamlit/app.py
 ```
 
+## Stage 1 — Traffic Volume Models (Ridge / Bayesian Linear)
+
+Stage 1 fits a Ridge Regression and a Bayesian Linear Regression to the
+engineered panel in `data/data_engineering.csv`, using a from-scratch NumPy
+implementation with closed-form analytical solutions.
+
+### Offline experiment and hyperparameter tuning
+
+Run the offline experiment pipeline. A strict 70/15/15 chronological
+split is used, combined with out-of-fold (OOF) target encoding to prevent
+in-sample leakage. Grid searches are performed exclusively on the validation
+set, and unbiased metrics are reported on the held-out test set.
+
+```bash
+uv run python -m stage1.main --csv data/data_engineering.csv
+```
+
+### Final prediction pipeline
+
+**1) Refit on the full panel.** Retrain Ridge + Bayesian on ALL rows with
+the best hyperparameters discovered offline. Computes global target encoding
+mappings and writes `stage1/checkpoints/final/{ridge,bayesian}.npz`.
+
+```bash
+uv run python -m stage1.predict fit
+```
+
+**2) Single-record scoring (Streamlit).** `TrafficPredictor.predict_one(record)`
+dynamically reconstructs target encodings and exact One-Hot schemas. It
+returns a dict with `traffic_ridge` and `traffic_bayesian` — used by the
+Streamlit app.
+
+**3) Batch CSV scoring.** Score a new raw-feature CSV; the output CSV
+gets `pred_traffic_ridge` and `pred_traffic_bayesian` columns.
+
+```bash
+uv run python -m stage1.predict predict \
+    data/new_panel.csv  data/new_panel_pred.csv
+```
+
+
 ## Stage 2 — Crash Count Models (Poisson / Negative Binomial)
 
 Stage 2 fits a Poisson GLM and a Negative Binomial (NB2) GLM to the
@@ -46,14 +87,22 @@ uv run python stage2/main.py \
 
 ### Final prediction pipeline
 
-Retrain on the full panel with the best hyperparameters, then score new
-raw-feature CSVs:
+**1) Refit on the full panel.** Retrain Poisson + NB on ALL rows with
+the best hyperparameters; writes
+`stage2/checkpoints/final/{poisson,nb}.npz`.
 
 ```bash
-# 1) Refit Poisson + NB on ALL rows; writes stage2/checkpoints/final/{poisson,nb}.npz
 uv run python stage2/predict.py fit
+```
 
-# 2) Predict on new data. Output CSV gets pred_poisson and pred_nb columns.
+**2) Single-record scoring (Streamlit).** `CrashPredictor.predict_one(record)`
+returns a dict with `mu_poisson`, `mu_nb`, `nb_sd`, and the 95% NB
+prediction interval — used by the Streamlit app.
+
+**3) Batch CSV scoring.** Score a new raw-feature CSV; the output CSV
+gets `pred_poisson` and `pred_nb` columns.
+
+```bash
 uv run python stage2/predict.py predict \
     data/new_panel.csv  data/new_panel_pred.csv
 ```
@@ -61,3 +110,11 @@ uv run python stage2/predict.py predict \
 The input CSV must follow the same raw-feature schema as
 `data_engineering.csv` (columns `zip_code`, `weekday`, `is_peak`,
 `log_traffic_count`, weather flags/z-scores, and the `WT0x` indicators).
+
+## Authors
+
+- Haoyang Song (hs2289)
+- Hanqi Guo (hg493)
+- Leafred Ye (zy495)
+- Wenzhuo Zhang (wz475)
+- Yu Rao (yr279)
