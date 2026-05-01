@@ -57,7 +57,7 @@ implementation with either batch gradient descent or IRLS/Newton.
 ### Train with defaults
 
 Defaults are already set to the best configuration found by grid search
-(IRLS solver, `lambda_reg=1e-3`, NB `alpha=0.2`). A 70/15/15 positional
+(IRLS solver, `lambda_reg=1e-3`, NB `alpha=0.15`). A 70/15/15 positional
 split is used; metrics are reported on the held-out test set.
 
 ```bash
@@ -110,6 +110,23 @@ uv run python stage2/predict.py predict \
 The input CSV must follow the same raw-feature schema as
 `data_engineering.csv` (columns `zip_code`, `weekday`, `is_peak`,
 `log_traffic_count`, weather flags/z-scores, and the `WT0x` indicators).
+
+**4) Weather-flag ablation (Streamlit / Python API).** `WeatherAblationPredictor`
+wraps a loaded `CrashPredictor` and runs one NB prediction per weather
+scenario defined in `WT_SCENARIOS` (No Flags + WT01–WT08, eight scenarios
+total). WT flags in the base record are overwritten automatically, so the
+caller does not need to set them.
+
+```python
+from stage2.predict import CrashPredictor, WeatherAblationPredictor
+
+crash_model    = CrashPredictor()           # load once; safe for st.cache_resource
+ablation_model = WeatherAblationPredictor(crash_model)
+
+results = ablation_model.predict(base_record)
+# list[dict] with keys: scenario, mu_nb, delta, delta_pct
+# delta / delta_pct are relative to the "No Flags" baseline
+```
 
 ## Authors
 
