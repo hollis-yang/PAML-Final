@@ -256,7 +256,7 @@ with tab_pred:
                     "WT03": 1 if thunder else 0,
                     "WT04": 1 if ice_pellets else 0,
                     "WT06": 1 if glaze else 0,
-                    "WT08": 0 # Not directly mapped from UI currently
+                    "WT08": 1 if blowing_snow else 0
                 }
                 
                 input_record = {
