@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
                    help="NB GD learning rate (unused with IRLS).")
     p.add_argument("--nb-lambda", type=float, default=1e-3,
                    help="NB L2 regularization strength.")
-    p.add_argument("--nb-alpha", type=float, default=0.2,
+    p.add_argument("--nb-alpha", type=float, default=0.15,
                    help="NB dispersion parameter (fixed).")
 
     p.add_argument("--tune", action="store_true",

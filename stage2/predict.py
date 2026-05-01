@@ -219,6 +219,26 @@ def cmd_fit(args: argparse.Namespace) -> None:
 # predict — Python API
 # ---------------------------------------------------------------------------
 
+# All WT flag features the model knows about, with human-readable labels.
+# WT05 (hail) is excluded — it is all-zero in the dataset and was dropped
+# from the feature space during training.
+WT_SCENARIOS: dict[str, dict[str, int]] = {
+    "No Flags":           {},
+    "Fog (WT01)":         {"WT01": 1},
+    "Heavy Fog (WT02)":   {"WT02": 1},
+    "Thunder (WT03)":     {"WT03": 1},
+    "Ice Pellets (WT04)": {"WT04": 1},
+    "Hail (WT05)":        {"WT05": 1},  # all-zero in training data; model output = No Flags
+    "Glaze (WT06)":       {"WT06": 1},
+    "Blowing Snow (WT08)":{"WT08": 1},
+}
+
+# Zero-value template for all WT flags (used to sanitise incoming records).
+# WT05 is included so frontend records are fully sanitised even though the
+# model ignores it (not in _BINARY_FEATURES — dropped during feature engineering).
+_WT_ZEROS = {k: 0 for k in ("WT01", "WT02", "WT03", "WT04", "WT05", "WT06", "WT08")}
+
+
 class CrashPredictor:
     """Single entry point for Stage 2 inference.
 
@@ -320,6 +340,80 @@ def _nb_interval(mu: np.ndarray, alpha: float,
     hi_q = 1 - lo_q
     return (nbinom.ppf(lo_q, n, p).astype(int),
             nbinom.ppf(hi_q, n, p).astype(int))
+
+
+# ---------------------------------------------------------------------------
+# WeatherAblationPredictor
+# ---------------------------------------------------------------------------
+
+class WeatherAblationPredictor:
+    """Standalone weather-flag ablation module for Stage 2.
+
+    Wraps a loaded CrashPredictor and runs one NB prediction per scenario
+    in WT_SCENARIOS, returning a list ready for charting in Streamlit or
+    any other frontend.
+
+    Usage
+    -----
+        from stage2.predict import CrashPredictor, WeatherAblationPredictor
+
+        crash_model    = CrashPredictor()          # load once, cache_resource
+        ablation_model = WeatherAblationPredictor(crash_model)
+
+        results = ablation_model.predict(base_record)
+        # results is a list[dict] with keys: scenario, mu_nb, delta, delta_pct
+    """
+
+    #: Ordered scenario definitions — exposed so the frontend can iterate
+    #: over labels without importing the private constant.
+    scenarios: dict[str, dict[str, int]] = WT_SCENARIOS
+
+    def __init__(self, crash_predictor: CrashPredictor):
+        """
+        Parameters
+        ----------
+        crash_predictor : CrashPredictor
+            A fully loaded CrashPredictor instance. Models are reused and
+            not reloaded, so this is safe to pass a @st.cache_resource object.
+        """
+        self._predictor = crash_predictor
+
+    def predict(self, base_record: dict) -> list[dict]:
+        """
+        Run NB predictions for every scenario in WT_SCENARIOS.
+
+        Parameters
+        ----------
+        base_record : dict
+            Feature record for the target (zip, date, weather conditions).
+            All WT flag fields are overwritten per scenario, so it is safe
+            to pass a record with or without existing WT values.
+
+        Returns
+        -------
+        list[dict], one entry per scenario, ordered as in WT_SCENARIOS:
+            scenario  : str   — human-readable label (e.g. "Fog (WT01)")
+            mu_nb     : float — NB predicted crash count
+            delta     : float — absolute difference vs "No Flags" baseline
+            delta_pct : float — percentage difference vs "No Flags" baseline
+        """
+        base = {**base_record, **_WT_ZEROS}
+        results: list[dict] = []
+        baseline: float | None = None
+
+        for label, overrides in WT_SCENARIOS.items():
+            mu = self._predictor.predict_one({**base, **overrides})["mu_nb"]
+            if baseline is None:
+                baseline = mu
+            delta = mu - baseline
+            results.append({
+                "scenario": label,
+                "mu_nb": mu,
+                "delta": delta,
+                "delta_pct": (delta / baseline * 100) if baseline > 0 else 0.0,
+            })
+
+        return results
 
 
 # ---------------------------------------------------------------------------
