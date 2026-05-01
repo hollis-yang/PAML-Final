@@ -72,7 +72,7 @@ except ModuleNotFoundError:
 #   Poisson: val PoissonDev minimized at lambda_reg=1e-3 under IRLS.
 #   NB     : val NLL minimized at alpha=0.2, lambda_reg=1e-3 under IRLS.
 BEST_POISSON = dict(solver="irls", lambda_reg=1e-3)
-BEST_NB = dict(solver="irls", lambda_reg=1e-3, alpha=0.2)
+BEST_NB = dict(solver="irls", lambda_reg=1e-3, alpha=0.15)
 
 # IRLS converges in ~9 iters via step-norm tolerance; these caps are generous.
 FIT_MAX_ITER = 50

@@ -96,14 +96,14 @@ POISSON_GRID = {
     "lr": [0.005, 0.01, 0.02, 0.05],
     "lambda_reg": [1e-5, 1e-4, 1e-3],
 }
-# NB alpha grid centered on the pooled MoM estimate (~0.77). A prior NLL
-# tune selected alpha=0.2 at the grid upper edge, so the grid now extends
-# through 1.0. Lambda is held to two values since a prior sweep showed it
+# NB alpha grid. Prior tune found alpha=0.2 near the lower end of [0.1, 1.0],
+# so the grid is extended downward to [0.05, 0.08] to check if smaller values
+# improve val NLL. Lambda is held to two values since a prior sweep showed it
 # moves val NLL by <0.1 (n=546k >> d=200, regularization barely bites).
 NB_GRID = {
     "lr": [0.1, 0.3, 0.5, 1.0],
     "lambda_reg": [1e-4, 1e-3],
-    "alpha": [0.1, 0.2, 0.3, 0.5, 0.8, 1.0],
+    "alpha": [0.05, 0.08, 0.1, 0.15, 0.2, 0.3, 0.5],
 }
 
 

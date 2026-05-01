@@ -253,7 +253,11 @@ def _fit_irls_glm(model, X: np.ndarray, y: np.ndarray,
         model.train_loss_.append(cur_loss)
 
         if use_val:
-            dev = poisson_deviance(y_val, _safe_exp(X_val @ beta))
+            mu_val = _safe_exp(X_val @ beta)
+            if family == "poisson":
+                dev = poisson_deviance(y_val, mu_val)
+            else:
+                dev = model.neg_log_likelihood(y_val, mu_val)
             model.val_deviance_.append(dev)
             if dev < best_val - model.tol:
                 best_val = dev
