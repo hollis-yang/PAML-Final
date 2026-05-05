@@ -269,9 +269,11 @@ with tab_pred:
         
         zip_code = st.text_input("ZIP Code (5-digit)", value="", placeholder="e.g. 10001", max_chars=5, key="pred_zip")
         time_period = st.radio("Time Period", options=["Peak Hours", "Off-Peak"], horizontal=True)
-        
+        st.caption("Peak Hours: 7:00–9:30 AM (morning) and 4:00–7:00 PM (evening). All other hours are Off-Peak.")
+
         st.markdown("---")
         st.markdown("##### Weather Conditions")
+        st.caption("Defaults are pre-filled with historical averages for the selected date (±10 days across all years in the dataset).")
         c1, c2 = st.columns(2)
         with c1:
             temp = st.number_input("Temperature (°F)", value=round(avg_tavg, 1), step=1.0)
