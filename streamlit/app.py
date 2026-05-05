@@ -199,10 +199,7 @@ def get_historical_weather_avg(target_date):
 def get_map_shapes():
     shp_path = "data/geo_data/nyc_zip/nyc_zip.shp"
     gdf = gpd.read_file(shp_path)
-    if "ZIPCODE" in gdf.columns:
-        gdf["zip_code"] = gdf["ZIPCODE"].astype(str)
-    elif "zcta" in gdf.columns:
-        gdf["zip_code"] = gdf["zcta"].astype(str)
+    gdf["zip_code"] = gdf["modzcta"].astype(str)
     if gdf.crs != "EPSG:4326":
         gdf = gdf.to_crs(epsg=4326)
     return gdf
@@ -388,37 +385,53 @@ with tab_pred:
                     # Input summary box
                     st.markdown("---")
                     st.markdown("##### Input Summary")
-                    st.write(f"**ZIP Code:** {zip_code if zip_code else '10001'}  |  **Date:** {date_input} (Weekday: {wd})  |  **Time:** {time_period}")
-                    st.write(f"**Weather:** {temp}°F, {precip}in precip, {wind_speed}mph wind")
-                    
+
+                    _days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                    _borough = get_borough_from_zip(zip_code)
+
+                    _sc1, _sc2, _sc3 = st.columns(3)
+                    _sc1.markdown(f"**Location**  \nZIP {zip_code} · {_borough}")
+                    _sc2.markdown(f"**Date**  \n{date_input} ({_days[wd]})")
+                    _sc3.markdown(f"**Time Period**  \n{time_period}")
+
+                    _sc4, _sc5, _sc6 = st.columns(3)
+                    _sc4.markdown(f"**Temperature**  \n{temp}°F")
+                    _sc5.markdown(f"**Precipitation**  \n{precip} in · Wind {wind_speed} mph")
+                    _sc6.markdown(f"**Snow**  \nFall {snowfall} in · Depth {snow_depth} in")
+
                     flags_selected = [flag_name for flag_val, flag_name in zip(
                         [fog, heavy_fog, thunder, ice_pellets, hail, glaze, blowing_snow],
                         ["Fog", "Heavy Fog", "Thunder", "Ice Pellets", "Hail", "Glaze", "Blowing Snow"]
                     ) if flag_val]
-                    
-                    if flags_selected:
-                        st.write(f"**Active Weather Flags:** {', '.join(flags_selected)}")
-                    else:
-                        st.write("**Active Weather Flags:** None")
+                    flag_str = ", ".join(flags_selected) if flags_selected else "None"
+                    st.markdown(f"**Extreme Weather Flags**  \n{flag_str}")
                     
                     st.markdown("---")
                     st.markdown("##### Comparison: Poisson vs Negative Binomial")
                     comp_df = pd.DataFrame({
                         "Model": ["Poisson", "Negative Binomial"],
-                        "Predicted Count": [c2_preds["mu_poisson"], c2_preds["mu_nb"]]
+                        "Predicted Count": [
+                            round(c2_preds["mu_poisson"], 3),
+                            round(c2_preds["mu_nb"], 3),
+                        ]
                     })
-                    
+
                     # Use Altair to give each model a distinct color
                     compare_chart = alt.Chart(comp_df).mark_bar().encode(
                         x=alt.X("Model:N", axis=alt.Axis(labelAngle=0)),
                         y=alt.Y("Predicted Count:Q"),
                         color=alt.Color("Model:N", scale=alt.Scale(
                             domain=["Poisson", "Negative Binomial"],
-                            range=["#1f77b4", "#f97316"] # Classic Blue for Poisson, Orange for NB
-                        ), legend=None)
+                            range=["#1f77b4", "#f97316"]
+                        ), legend=None),
+                        tooltip=[
+                            alt.Tooltip("Model:N"),
+                            alt.Tooltip("Predicted Count:Q", format=".3f"),
+                        ]
                     ).properties(height=300)
-                    
+
                     st.altair_chart(compare_chart, use_container_width=True)
+                    st.caption("Note: Negative Binomial is the preferred model — it explicitly accounts for overdispersion (variance > mean) in crash counts, yielding better-calibrated predictions and a significantly higher log-likelihood (LRT p ≈ 10⁻¹⁸⁵).")
                     
                     st.markdown("---")
                     st.markdown("##### Extreme Weather Impact (Ablation Analysis)")
@@ -429,16 +442,19 @@ with tab_pred:
                         
                         chart_df = ablation_df.copy()
                         chart_df["scenario"] = chart_df["scenario"].str.replace(r"\s+\(WT\d+\)$", "", regex=True)
-                        chart_df["scenario"] = chart_df["scenario"].replace("No Flags", "No extreme weather")
+                        chart_df["scenario"] = chart_df["scenario"].replace("No Flags", "None")
                         chart_df["delta_text"] = chart_df["delta_pct"].apply(lambda x: f"+{x:.2f}%" if x > 0 else f"{x:.2f}%")
                         chart_df["color"] = chart_df["delta_pct"].apply(
                             lambda x: "#ef4444" if x > 0 else ("#22c55e" if x < 0 else "#94a3b8")
                         )
-                        
+                        chart_df["Predicted Crashes"] = chart_df["mu_nb"].round(3)
+                        chart_df["Change vs No Flags"] = chart_df["delta"].round(3)
+                        chart_df["Change (%)"] = chart_df["delta_pct"].round(2)
+
                         base = alt.Chart(chart_df).encode(
                             x=alt.X("delta_pct:Q", title="Impact on Crash Count (%)"),
                             y=alt.Y("scenario:N", sort="-x", title=""),
-                            tooltip=["scenario", "mu_nb", "delta", "delta_pct"]
+                            tooltip=["scenario", "Predicted Crashes", "Change vs No Flags", "Change (%)"]
                         )
                         
                         bars = base.mark_bar().encode(
@@ -560,7 +576,14 @@ with tab_explore:
                             locations="zip_code",
                             featureidkey="properties.zip_code",
                             color="avg_crashes",
-                            color_continuous_scale="YlOrRd",
+                            color_continuous_scale=[
+                                [0.0,    "white"],
+                                [0.0001, "#ffffb2"],
+                                [0.25,   "#fecc5c"],
+                                [0.5,    "#fd8d3c"],
+                                [0.75,   "#f03b20"],
+                                [1.0,    "#bd0026"],
+                            ],
                             range_color=(0, map_merged["avg_crashes"].quantile(0.98) if not map_merged["avg_crashes"].empty else 1),
                             mapbox_style="carto-positron",
                             zoom=map_zoom,
@@ -609,7 +632,16 @@ with tab_explore:
                 heat = alt.Chart(df_heat).mark_rect().encode(
                     x=alt.X('Day:O', sort=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]),
                     y=alt.Y('Hour:O', title="Hour of Day"),
-                    color=alt.Color('Crashes:Q', scale=alt.Scale(scheme='orangered'), title="Avg Crashes")
+                    color=alt.Color('Crashes:Q',
+                        scale=alt.Scale(
+                            domain=[0,
+                                    df_heat['Crashes'].max() * 0.25 or 1,
+                                    df_heat['Crashes'].max() * 0.5  or 1,
+                                    df_heat['Crashes'].max() * 0.75 or 1,
+                                    df_heat['Crashes'].max() or 1],
+                            range=['white', '#fdae6b', '#f16913', '#d94801', '#8c2d04']
+                        ),
+                        title="Avg Crashes")
                 ).properties(height=350)
                 st.altair_chart(heat, use_container_width=True)
             else:
