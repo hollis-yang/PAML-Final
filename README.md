@@ -140,7 +140,7 @@ uv run streamlit run streamlit/app.py
 
 The dashboard includes two main tabs:
 - **Prediction**: Enter a specific date, location, and weather conditions to get crash predictions using the two-stage model pipeline. It includes a side-by-side comparison of the Poisson vs Negative Binomial models, alongside an ablation analysis chart showing the impact of various extreme weather conditions.
-- **Explore Data**: Interactively filter historical traffic and crash data by date range, time period, weather, and borough. It visualizes the data through four key charts: an **Average Crash Density** choropleth map, a **Crash Heatmap by Hour & Day**, a **Top 10 ZIP Codes by Crash Count** bar chart, and a **Traffic Volume vs. Crash Count** correlation scatter plot.
+- **Explore Data**: Interactively filter historical traffic and crash data by date range, time period, and borough. It visualizes the data through four key charts: an **Average Crash Density** choropleth map, a **Crash Heatmap by Hour & Day**, a **Top 10 ZIP Codes by Crash Count** bar chart, and a **Traffic Volume vs. Crash Count** correlation scatter plot.
 
 ## Authors
 

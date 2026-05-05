@@ -214,7 +214,7 @@ def get_borough_from_zip(z):
     except:
         return 'Unknown'
 
-def filter_data(df, date_range, time_period, weather, borough, zip_code):
+def filter_data(df, date_range, time_period, borough, zip_code):
     filtered = df.copy()
     
     # 0. Date Range
@@ -230,15 +230,6 @@ def filter_data(df, date_range, time_period, weather, borough, zip_code):
     elif time_period == "Off-Peak":
         filtered = filtered[filtered['is_peak'] == 0]
         
-    # 2. Weather
-    if weather == "Rain":
-        filtered = filtered[filtered['is_rain'] == 1]
-    elif weather == "Snow":
-        filtered = filtered[filtered['is_snow'] == 1]
-    elif weather == "Fog":
-        if 'WT01' in filtered.columns:
-            filtered = filtered[filtered['WT01'] == 1]
-            
     # 3. Borough filtering
     if borough != "All":
         filtered['borough'] = filtered['zip_code'].apply(get_borough_from_zip)
@@ -280,8 +271,7 @@ with tab_pred:
         # Get historical averages for pre-filling
         avg_tavg, avg_prcp, avg_snow, avg_snwd, avg_awnd = get_historical_weather_avg(date_input)
         
-        borough_pred = st.selectbox("Borough", options=["All", "Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"], key="pred_borough")
-        zip_code = st.text_input("ZIP Code (5-digit, Optional)", value="", placeholder="e.g. 10001", max_chars=5, key="pred_zip")
+        zip_code = st.text_input("ZIP Code (5-digit)", value="", placeholder="e.g. 10001", max_chars=5, key="pred_zip")
         time_period = st.radio("Time Period", options=["Peak Hours", "Off-Peak"], horizontal=True)
         
         st.markdown("---")
@@ -317,14 +307,9 @@ with tab_pred:
             st.markdown('<span class="premium-card"></span>', unsafe_allow_html=True)
             
             if predict_button:
-                valid_pred = True
-                if zip_code and borough_pred != "All":
-                    zip_borough = get_borough_from_zip(zip_code)
-                    if zip_borough != 'Unknown' and zip_borough != borough_pred:
-                        st.error(f"ZIP Code {zip_code} belongs to {zip_borough}, not {borough_pred}. Please correct your input.")
-                        valid_pred = False
-
-                if valid_pred:
+                if not zip_code:
+                    st.error("Please enter a 5-digit ZIP Code.")
+                else:
                     # 1. Prepare inputs for Stage 1
                     # Standardize weekday to 0-6 (Streamlit's date.weekday() is 0=Mon)
                     wd = date_input.weekday()
@@ -496,10 +481,7 @@ with tab_explore:
             # 2. Time Period
             time_period_filter = st.selectbox("Time Period", options=["All", "Peak", "Off-Peak"])
             
-            # 3. Weather
-            weather_filter = st.selectbox("Weather", options=["All", "Rain", "Snow", "Fog", "Clear"])
-            
-            # 4. Borough
+            # 3. Borough
             borough_filter = st.selectbox("Borough", options=["All", "Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"])
             
             # 5. Zipcode
@@ -529,7 +511,7 @@ with tab_explore:
                         valid = False
 
                 if valid:
-                    df_to_plot = filter_data(full_df, date_range, time_period_filter, weather_filter, borough_filter, zip_filter)
+                    df_to_plot = filter_data(full_df, date_range, time_period_filter, borough_filter, zip_filter)
                     st.toast(f"Filters applied! Showing {len(df_to_plot):,} records.")
                 else:
                     df_to_plot = pd.DataFrame()
