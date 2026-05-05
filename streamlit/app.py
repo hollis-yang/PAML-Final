@@ -111,6 +111,7 @@ st.markdown("""
     [data-testid="stCheckbox"] label {
         white-space: nowrap !important;
     }
+
     
     /* Premium Tabs Styling */
     button[data-baseweb="tab"] {
@@ -476,24 +477,33 @@ with tab_pred:
                 st.info("Please fill in the input conditions on the left and click 'Predict' to see the results.")
 
 with tab_explore:
+    # Load data before building filters so date bounds come from actual data
+    try:
+        full_df = get_raw_data()
+        if 'date' in full_df.columns and not full_df.empty:
+            MIN_DATE = full_df['date'].min()
+            MAX_DATE = full_df['date'].max()
+        else:
+            MIN_DATE = datetime.date(2020, 1, 1)
+            MAX_DATE = datetime.date(2025, 12, 31)
+    except Exception:
+        full_df = pd.DataFrame()
+        MIN_DATE = datetime.date(2020, 1, 1)
+        MAX_DATE = datetime.date(2025, 12, 31)
+
     # --- Layout: Two Columns ---
     exp_col1, exp_col2 = st.columns([1, 2.5], gap="large")
 
     with exp_col1:
         st.subheader("Filters")
-        
+
         with st.container(border=True):
             # 1. Date Range
-            MIN_DATE = datetime.date(2020, 1, 1)
-            MAX_DATE = datetime.date(2025, 12, 31)
-            end_date = min(datetime.date.today(), MAX_DATE)
-            start_date = max(end_date - datetime.timedelta(days=30), MIN_DATE)
-            date_range = st.date_input("Date Range", (start_date, end_date))
-            
-            if isinstance(date_range, tuple) and len(date_range) > 0:
-                if date_range[0] < MIN_DATE or (len(date_range) == 2 and date_range[1] > MAX_DATE):
-                    st.error(f"Please select dates between {MIN_DATE} and {MAX_DATE}.")
-            
+            end_date = MAX_DATE
+            start_date = datetime.date(MAX_DATE.year, 1, 1)
+            date_range = st.date_input("Date Range", (start_date, end_date),
+                                       min_value=MIN_DATE, max_value=MAX_DATE)
+
             # 2. Time Period
             time_period_filter = st.selectbox("Time Period", options=["All", "Peak", "Off-Peak"])
             
@@ -509,16 +519,9 @@ with tab_explore:
     with exp_col2:
         st.subheader("Visual Analysis")
         
-        # Load data once
         try:
-            full_df = get_raw_data()
             if apply_filters:
                 valid = True
-                
-                if isinstance(date_range, tuple) and len(date_range) > 0:
-                    if date_range[0] < MIN_DATE or (len(date_range) == 2 and date_range[1] > MAX_DATE):
-                        st.error(f"Cannot apply filters: Date range must be between {MIN_DATE} and {MAX_DATE}.")
-                        valid = False
 
                 if zip_filter:
                     if zip_filter not in VALID_ZIPS:
@@ -558,6 +561,10 @@ with tab_explore:
                         # Merge with shapes
                         map_merged = map_gdf.merge(agg_filtered, on="zip_code", how="left").fillna(0)
 
+                        # Fixed color range from global data so scale doesn't shift with filters
+                        _global_agg = full_df.groupby("zip_code")["crash_count"].mean()
+                        _color_max = float(_global_agg.quantile(0.98)) if not _global_agg.empty else 1.0
+
                         # Calculate dynamic center and zoom
                         map_center = {"lat": 40.7128, "lon": -74.0060}
                         map_zoom = 9
@@ -584,7 +591,7 @@ with tab_explore:
                                 [0.75,   "#f03b20"],
                                 [1.0,    "#bd0026"],
                             ],
-                            range_color=(0, map_merged["avg_crashes"].quantile(0.98) if not map_merged["avg_crashes"].empty else 1),
+                            range_color=(0, _color_max),
                             mapbox_style="carto-positron",
                             zoom=map_zoom,
                             center=map_center,
@@ -610,40 +617,53 @@ with tab_explore:
                 days_map = {0:"Mon", 1:"Tue", 2:"Wed", 3:"Thu", 4:"Fri", 5:"Sat", 6:"Sun"}
                 df_to_plot = df_to_plot.copy()
                 df_to_plot['Day'] = df_to_plot['weekday'].map(days_map)
-                
-                # to representative hours.
-                peak_data = df_to_plot[df_to_plot['is_peak'] == 1].groupby('Day')['crash_count'].mean().reset_index()
-                off_data = df_to_plot[df_to_plot['is_peak'] == 0].groupby('Day')['crash_count'].mean().reset_index()
-                
+
+                heat_agg = (
+                    df_to_plot
+                    .groupby(['Day', 'is_peak'])['crash_count']
+                    .mean()
+                    .reset_index()
+                )
+                heat_agg['Period'] = heat_agg['is_peak'].map({1: 'Peak', 0: 'Off-Peak'})
+                heat_agg['Avg Crashes'] = heat_agg['crash_count'].round(3)
+
+                peak_lookup  = heat_agg[heat_agg['Period'] == 'Peak'].set_index('Day')['Avg Crashes']
+                offpk_lookup = heat_agg[heat_agg['Period'] == 'Off-Peak'].set_index('Day')['Avg Crashes']
+
                 heatmap_rows = []
-                for d in days_map.values():
-                    p_val = peak_data[peak_data['Day'] == d]['crash_count'].values[0] if d in peak_data['Day'].values else 0
-                    o_val = off_data[off_data['Day'] == d]['crash_count'].values[0] if d in off_data['Day'].values else 0
-                    
+                for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]:
                     for h in range(24):
-                        # Map to representative hours based on the project's Peak definition (7-9, 16-19)
-                        if (7 <= h <= 9) or (16 <= h <= 19):
-                            heatmap_rows.append({"Day": d, "Hour": h, "Crashes": p_val})
-                        else:
-                            heatmap_rows.append({"Day": d, "Hour": h, "Crashes": o_val})
-                
+                        is_pk = (7 <= h <= 9) or (16 <= h <= 19)
+                        heatmap_rows.append({
+                            "Day": d, "Hour": h,
+                            "Avg Crashes": float(peak_lookup.get(d, 0) if is_pk else offpk_lookup.get(d, 0)),
+                            "Time Period": "Peak" if is_pk else "Off-Peak",
+                        })
+
                 df_heat = pd.DataFrame(heatmap_rows)
-                
-                heat = alt.Chart(df_heat).mark_rect().encode(
-                    x=alt.X('Day:O', sort=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]),
-                    y=alt.Y('Hour:O', title="Hour of Day"),
-                    color=alt.Color('Crashes:Q',
+                _max_c = df_heat['Avg Crashes'].max() or 1
+
+                heat = alt.Chart(df_heat).mark_rect(stroke=None).encode(
+                    x=alt.X('Day:O', sort=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                            axis=alt.Axis(grid=False, ticks=False)),
+                    y=alt.Y('Hour:O', title="Hour of Day",
+                            axis=alt.Axis(grid=False, ticks=False),
+                            scale=alt.Scale(paddingInner=0, paddingOuter=0)),
+                    color=alt.Color('Avg Crashes:Q',
                         scale=alt.Scale(
-                            domain=[0,
-                                    df_heat['Crashes'].max() * 0.25 or 1,
-                                    df_heat['Crashes'].max() * 0.5  or 1,
-                                    df_heat['Crashes'].max() * 0.75 or 1,
-                                    df_heat['Crashes'].max() or 1],
+                            domain=[0, _max_c*0.25, _max_c*0.5, _max_c*0.75, _max_c],
                             range=['white', '#fdae6b', '#f16913', '#d94801', '#8c2d04']
                         ),
-                        title="Avg Crashes")
-                ).properties(height=350)
+                        title="Avg Crashes"),
+                    tooltip=[
+                        alt.Tooltip('Day:O', title='Day'),
+                        alt.Tooltip('Hour:O', title='Hour'),
+                        alt.Tooltip('Time Period:N', title='Period'),
+                        alt.Tooltip('Avg Crashes:Q', title='Avg Crashes', format='.3f'),
+                    ]
+                ).properties(height=alt.Step(16)).configure_view(strokeWidth=0)
                 st.altair_chart(heat, use_container_width=True)
+                st.caption("Average crash count by day and hour. Peak hours (7–9 AM, 4–7 PM) use peak-period averages; all other hours use off-peak averages.")
             else:
                 st.warning("No data available for heatmap.")
             
