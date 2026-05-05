@@ -240,6 +240,9 @@ st.markdown("""
 <div class="header-container">
     <h1><span class="gradient-text">NYC CRASH PREDICTOR</span></h1>
     <div class="header-tagline"><span>Advanced Analytics & Machine Learning for Urban Safety</span></div>
+    <div style="margin-top: 0.8rem; color: #64748b; font-size: 0.82rem; letter-spacing: 0.05em;">
+        Haoyang Song &nbsp;·&nbsp; Hanqi Guo &nbsp;·&nbsp; Leafred Ye &nbsp;·&nbsp; Wenzhuo Zhang &nbsp;·&nbsp; Yu Rao
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
